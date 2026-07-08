@@ -1,0 +1,529 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1" />
+<title>Fat Boy Calc</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Anton&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap');
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #0d0d0d; }
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  input:focus { outline: 1px solid #ff5a1f; }
+  button:focus-visible { outline: 2px solid #ff5a1f; outline-offset: 2px; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useRef, useCallback } = React;
+
+/* ---------- constants ---------- */
+
+const TODAY = () => new Date().toISOString().slice(0, 10);
+const DEFAULT_TARGETS = { calories: 2400, protein: 180, carbs: 240, fat: 70 };
+const MACRO_DEF = [
+  { key: "protein", label: "PROTEIN", unit: "g", color: "#ff5a1f" },
+  { key: "carbs", label: "CARBS", unit: "g", color: "#3ea6ff" },
+  { key: "fat", label: "FAT", unit: "g", color: "#f5c26b" },
+];
+const emptyGuess = { name: "", calories: "", protein: "", carbs: "", fat: "", servings: 1 };
+
+/* ---------- storage helpers (localStorage — this is a real page, not a Claude artifact) ---------- */
+
+function loadJSON(key, fallback) {
+  try {
+    const v = window.localStorage.getItem(key);
+    if (!v) return fallback;
+    return JSON.parse(v);
+  } catch (e) {
+    return fallback;
+  }
+}
+function saveJSON(key, value) {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch (e) {
+    console.error("storage save failed", key, e);
+  }
+}
+
+/* ---------- small UI atoms ---------- */
+
+function Ring({ pct, size = 176, stroke = 14, color = "#ff5a1f" }) {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const clamped = Math.max(0, Math.min(1, pct));
+  return (
+    <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+      <circle cx={size / 2} cy={size / 2} r={r} fill="none" stroke="#1c1c1c" strokeWidth={stroke} />
+      <circle
+        cx={size / 2} cy={size / 2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeLinecap="round" strokeDasharray={c} strokeDashoffset={c * (1 - clamped)}
+        style={{ transition: "stroke-dashoffset 0.5s ease" }}
+      />
+    </svg>
+  );
+}
+
+function MacroBar({ def, value, target }) {
+  const pct = target > 0 ? Math.min(1, value / target) : 0;
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+        <span style={{ fontFamily: "Anton, sans-serif", fontSize: 13, letterSpacing: 1, color: "#b8b8b4" }}>{def.label}</span>
+        <span style={{ fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#f5f5f2" }}>
+          {Math.round(value)}<span style={{ color: "#6a6a66" }}> / {target}{def.unit}</span>
+        </span>
+      </div>
+      <div style={{ height: 10, background: "#1a1a1a", borderRadius: 5, overflow: "hidden" }}>
+        <div style={{
+          width: `${pct * 100}%`, height: "100%", background: def.color, borderRadius: 5,
+          backgroundImage: "repeating-linear-gradient(90deg, rgba(0,0,0,0.15) 0px, rgba(0,0,0,0.15) 2px, transparent 2px, transparent 8px)",
+          transition: "width 0.4s ease",
+        }} />
+      </div>
+    </div>
+  );
+}
+
+function Button({ children, onClick, variant = "solid", style = {}, type = "button", disabled }) {
+  const base = {
+    fontFamily: "Anton, sans-serif", letterSpacing: 1, fontSize: 14, padding: "12px 18px",
+    borderRadius: 8, border: "none", cursor: disabled ? "default" : "pointer",
+    opacity: disabled ? 0.5 : 1, transition: "transform 0.1s ease, opacity 0.15s ease",
+  };
+  const variants = {
+    solid: { background: "#ff5a1f", color: "#0d0d0d" },
+    ghost: { background: "transparent", color: "#f5f5f2", border: "1px solid #333" },
+    subtle: { background: "#1a1a1a", color: "#f5f5f2" },
+  };
+  return (
+    <button type={type} disabled={disabled} onClick={onClick}
+      onMouseDown={(e) => (e.currentTarget.style.transform = "scale(0.97)")}
+      onMouseUp={(e) => (e.currentTarget.style.transform = "scale(1)")}
+      style={{ ...base, ...variants[variant], ...style }}>
+      {children}
+    </button>
+  );
+}
+
+function Field({ label, value, onChange, type = "text", suffix }) {
+  return (
+    <label style={{ display: "block", marginBottom: 10 }}>
+      <div style={{ fontSize: 11, letterSpacing: 1, color: "#8a8a86", marginBottom: 4, fontFamily: "Anton, sans-serif" }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", background: "#161616", borderRadius: 8, border: "1px solid #262626" }}>
+        <input value={value} onChange={(e) => onChange(e.target.value)} type={type}
+          style={{ flex: 1, background: "transparent", border: "none", outline: "none", color: "#f5f5f2", padding: "10px 12px", fontFamily: "'JetBrains Mono', monospace", fontSize: 14 }} />
+        {suffix && <span style={{ color: "#6a6a66", paddingRight: 12, fontSize: 12 }}>{suffix}</span>}
+      </div>
+    </label>
+  );
+}
+
+/* ---------- Add Food Modal ---------- */
+
+function AddFoodModal({ onClose, onAdd, apiKey, onNeedApiKey }) {
+  const [tab, setTab] = useState("search");
+  const [query, setQuery] = useState("");
+  const [barcode, setBarcode] = useState("");
+  const [results, setResults] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [guess, setGuess] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
+  const fileInputRef = useRef(null);
+
+  const per100ToServing = (p) => ({
+    name: p.product_name || p.generic_name || "Unnamed item",
+    calories: Math.round(p?.nutriments?.["energy-kcal_100g"] || 0),
+    protein: Math.round(p?.nutriments?.proteins_100g || 0),
+    carbs: Math.round(p?.nutriments?.carbohydrates_100g || 0),
+    fat: Math.round(p?.nutriments?.fat_100g || 0),
+    servings: 1,
+    note: "per 100g — adjust servings to match your portion",
+  });
+
+  async function runSearch() {
+    if (!query.trim()) return;
+    setLoading(true); setError(""); setResults([]);
+    try {
+      const url = `https://world.openfoodfacts.org/cgi/search.pl?search_terms=${encodeURIComponent(query)}&search_simple=1&action=process&json=1&page_size=15`;
+      const res = await fetch(url);
+      const data = await res.json();
+      const products = (data.products || []).filter((p) => p.product_name);
+      setResults(products.slice(0, 12));
+      if (products.length === 0) setError("No matches — try a simpler search term or enter manually.");
+    } catch (e) {
+      setError("Search failed. Check your connection and try again.");
+    }
+    setLoading(false);
+  }
+
+  async function lookupBarcode() {
+    if (!barcode.trim()) return;
+    setLoading(true); setError("");
+    try {
+      const res = await fetch(`https://world.openfoodfacts.org/api/v2/product/${barcode.trim()}.json`);
+      const data = await res.json();
+      if (data.status === 1 && data.product) {
+        setGuess(per100ToServing(data.product));
+      } else {
+        setError("Barcode not found — try search or manual entry.");
+      }
+    } catch (e) {
+      setError("Lookup failed. Check your connection and try again.");
+    }
+    setLoading(false);
+  }
+
+  function handlePhotoFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (!apiKey) { onNeedApiKey(); return; }
+    const reader = new FileReader();
+    reader.onload = async () => {
+      const base64 = reader.result.split(",")[1];
+      setPhotoPreview(reader.result);
+      await analyzePhoto(base64, file.type);
+    };
+    reader.readAsDataURL(file);
+  }
+
+  async function analyzePhoto(base64, mediaType) {
+    setLoading(true); setError(""); setGuess(null);
+    try {
+      const response = await fetch("https://api.anthropic.com/v1/messages", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-6",
+          max_tokens: 1000,
+          messages: [{
+            role: "user",
+            content: [
+              { type: "image", source: { type: "base64", media_type: mediaType || "image/jpeg", data: base64 } },
+              { type: "text", text: "Identify the food in this photo and estimate nutrition for the visible portion. Respond with ONLY raw JSON, no markdown fences, no preamble, in exactly this shape: {\"name\": string, \"portion_note\": string, \"calories\": number, \"protein\": number, \"carbs\": number, \"fat\": number}. Numbers are grams for protein/carbs/fat and kcal for calories, estimated for the whole visible portion (not per 100g). If multiple items are visible, combine into one estimate and name it descriptively." },
+            ],
+          }],
+        }),
+      });
+      const data = await response.json();
+      if (data.error) throw new Error(data.error.message || "API error");
+      const textBlock = (data.content || []).find((b) => b.type === "text");
+      if (!textBlock) throw new Error("no text in response");
+      const clean = textBlock.text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      setGuess({
+        name: parsed.name || "AI guess",
+        calories: Math.round(parsed.calories || 0),
+        protein: Math.round(parsed.protein || 0),
+        carbs: Math.round(parsed.carbs || 0),
+        fat: Math.round(parsed.fat || 0),
+        servings: 1,
+        note: parsed.portion_note || "AI estimate — adjust if it looks off",
+      });
+    } catch (e) {
+      setError("Couldn't read that photo (" + e.message + "). Check your API key in Targets, or enter manually.");
+    }
+    setLoading(false);
+  }
+
+  function selectResult(p) { setGuess(per100ToServing(p)); }
+  function startManual() { setGuess({ ...emptyGuess, servings: 1 }); }
+
+  function confirmAdd() {
+    const g = guess;
+    const mult = parseFloat(g.servings) || 1;
+    onAdd({
+      id: Date.now().toString(36),
+      name: g.name || "Unnamed item",
+      calories: Math.round((parseFloat(g.calories) || 0) * mult),
+      protein: Math.round((parseFloat(g.protein) || 0) * mult),
+      carbs: Math.round((parseFloat(g.carbs) || 0) * mult),
+      fat: Math.round((parseFloat(g.fat) || 0) * mult),
+    });
+  }
+
+  const tabs = [
+    { id: "search", label: "SEARCH" },
+    { id: "barcode", label: "BARCODE" },
+    { id: "photo", label: "PHOTO" },
+    { id: "manual", label: "MANUAL" },
+  ];
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)", display: "flex", alignItems: "flex-end", justifyContent: "center", zIndex: 50 }}
+      onClick={(e) => e.target === e.currentTarget && onClose()}>
+      <div style={{ background: "#111", width: "100%", maxWidth: 480, maxHeight: "88vh", overflowY: "auto", borderRadius: "18px 18px 0 0", padding: "18px 18px 28px", border: "1px solid #262626", borderBottom: "none" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <span style={{ fontFamily: "Anton, sans-serif", fontSize: 20, color: "#f5f5f2", letterSpacing: 1 }}>ADD FOOD</span>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8a8a86", fontSize: 22, cursor: "pointer", lineHeight: 1 }}>✕</button>
+        </div>
+
+        {!guess && (
+          <>
+            <div style={{ display: "flex", gap: 6, marginBottom: 16, overflowX: "auto" }}>
+              {tabs.map((t) => (
+                <button key={t.id} onClick={() => { setTab(t.id); setError(""); if (t.id === "manual") startManual(); }}
+                  style={{ fontFamily: "Anton, sans-serif", fontSize: 12, letterSpacing: 1, padding: "8px 14px", borderRadius: 20, border: "1px solid #2a2a2a", background: tab === t.id ? "#ff5a1f" : "transparent", color: tab === t.id ? "#0d0d0d" : "#b8b8b4", cursor: "pointer", whiteSpace: "nowrap" }}>
+                  {t.label}
+                </button>
+              ))}
+            </div>
+
+            {tab === "search" && (
+              <div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ flex: 1 }}><Field label="FOOD NAME" value={query} onChange={setQuery} /></div>
+                  <div style={{ paddingTop: 20 }}><Button onClick={runSearch} disabled={loading}>{loading ? "…" : "GO"}</Button></div>
+                </div>
+                {error && <p style={{ color: "#ff8a5c", fontSize: 13 }}>{error}</p>}
+                <div>
+                  {results.map((p, i) => (
+                    <button key={i} onClick={() => selectResult(p)} style={{ display: "block", width: "100%", textAlign: "left", background: "#161616", border: "1px solid #232323", borderRadius: 8, padding: "10px 12px", marginBottom: 6, cursor: "pointer" }}>
+                      <div style={{ color: "#f5f5f2", fontSize: 14 }}>{p.product_name}</div>
+                      <div style={{ color: "#6a6a66", fontSize: 12, fontFamily: "'JetBrains Mono', monospace" }}>
+                        {Math.round(p?.nutriments?.["energy-kcal_100g"] || 0)} kcal / 100g{p.brands ? ` · ${p.brands}` : ""}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {tab === "barcode" && (
+              <div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <div style={{ flex: 1 }}><Field label="BARCODE NUMBER" value={barcode} onChange={setBarcode} /></div>
+                  <div style={{ paddingTop: 20 }}><Button onClick={lookupBarcode} disabled={loading}>{loading ? "…" : "GO"}</Button></div>
+                </div>
+                {error && <p style={{ color: "#ff8a5c", fontSize: 13 }}>{error}</p>}
+                <p style={{ color: "#6a6a66", fontSize: 12 }}>Type the UPC/EAN digits printed under the barcode.</p>
+              </div>
+            )}
+
+            {tab === "photo" && (
+              <div>
+                <input ref={fileInputRef} type="file" accept="image/*" capture="environment" onChange={handlePhotoFile} style={{ display: "none" }} />
+                {photoPreview ? <img src={photoPreview} alt="food" style={{ width: "100%", borderRadius: 10, marginBottom: 12, maxHeight: 220, objectFit: "cover" }} /> : null}
+                <Button onClick={() => fileInputRef.current?.click()} disabled={loading} style={{ width: "100%" }}>
+                  {loading ? "ANALYZING…" : photoPreview ? "RETAKE PHOTO" : "TAKE / UPLOAD PHOTO"}
+                </Button>
+                {!apiKey && <p style={{ color: "#f5c26b", fontSize: 12, marginTop: 8 }}>Add your Anthropic API key under TARGETS to enable this.</p>}
+                {error && <p style={{ color: "#ff8a5c", fontSize: 13, marginTop: 8 }}>{error}</p>}
+                <p style={{ color: "#6a6a66", fontSize: 12, marginTop: 10 }}>AI gives a fast estimate — always a guess, not a measurement. Check it before logging.</p>
+              </div>
+            )}
+
+            {tab === "manual" && <p style={{ color: "#6a6a66", fontSize: 13 }}>Enter the details below.</p>}
+          </>
+        )}
+
+        {guess && (
+          <div>
+            {guess.note && (
+              <div style={{ background: "#1a1408", border: "1px solid #3a2a10", color: "#f5c26b", fontSize: 12, padding: "8px 10px", borderRadius: 8, marginBottom: 12 }}>
+                {guess.note}
+              </div>
+            )}
+            <Field label="FOOD NAME" value={guess.name} onChange={(v) => setGuess({ ...guess, name: v })} />
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <Field label="CALORIES" value={guess.calories} onChange={(v) => setGuess({ ...guess, calories: v })} type="number" />
+              <Field label="SERVINGS ×" value={guess.servings} onChange={(v) => setGuess({ ...guess, servings: v })} type="number" />
+              <Field label="PROTEIN (g)" value={guess.protein} onChange={(v) => setGuess({ ...guess, protein: v })} type="number" />
+              <Field label="CARBS (g)" value={guess.carbs} onChange={(v) => setGuess({ ...guess, carbs: v })} type="number" />
+              <Field label="FAT (g)" value={guess.fat} onChange={(v) => setGuess({ ...guess, fat: v })} type="number" />
+            </div>
+            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+              <Button variant="ghost" onClick={() => setGuess(null)} style={{ flex: 1 }}>BACK</Button>
+              <Button onClick={confirmAdd} style={{ flex: 2 }}>ADD TO LOG</Button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ---------- Settings ---------- */
+
+function Settings({ targets, setTargets, apiKey, setApiKey }) {
+  const [local, setLocal] = useState(targets);
+  const [keyLocal, setKeyLocal] = useState(apiKey || "");
+  useEffect(() => setLocal(targets), [targets]);
+  useEffect(() => setKeyLocal(apiKey || ""), [apiKey]);
+
+  return (
+    <div>
+      <h2 style={{ fontFamily: "Anton, sans-serif", fontSize: 18, letterSpacing: 1, color: "#f5f5f2", marginBottom: 14 }}>DAILY TARGETS</h2>
+      <Field label="CALORIES" value={local.calories} onChange={(v) => setLocal({ ...local, calories: v })} type="number" suffix="kcal" />
+      <Field label="PROTEIN" value={local.protein} onChange={(v) => setLocal({ ...local, protein: v })} type="number" suffix="g" />
+      <Field label="CARBS" value={local.carbs} onChange={(v) => setLocal({ ...local, carbs: v })} type="number" suffix="g" />
+      <Field label="FAT" value={local.fat} onChange={(v) => setLocal({ ...local, fat: v })} type="number" suffix="g" />
+      <Button onClick={() => setTargets({ calories: parseInt(local.calories) || 0, protein: parseInt(local.protein) || 0, carbs: parseInt(local.carbs) || 0, fat: parseInt(local.fat) || 0 })} style={{ width: "100%", marginTop: 6, marginBottom: 26 }}>
+        SAVE TARGETS
+      </Button>
+
+      <h2 style={{ fontFamily: "Anton, sans-serif", fontSize: 18, letterSpacing: 1, color: "#f5f5f2", marginBottom: 10 }}>AI PHOTO GUESS</h2>
+      <p style={{ color: "#8a8a86", fontSize: 12, marginBottom: 10 }}>
+        Needs your own Anthropic API key since this page runs outside claude.ai. Get one at console.anthropic.com — usage is billed to your account (typically a fraction of a cent per photo). Stored only in this browser.
+      </p>
+      <Field label="ANTHROPIC API KEY" value={keyLocal} onChange={setKeyLocal} type="password" />
+      <Button onClick={() => setApiKey(keyLocal.trim())} style={{ width: "100%" }}>SAVE API KEY</Button>
+    </div>
+  );
+}
+
+/* ---------- History ---------- */
+
+function History({ history }) {
+  const days = Object.keys(history).sort((a, b) => (a < b ? 1 : -1));
+  if (days.length === 0) return <p style={{ color: "#6a6a66", fontSize: 14 }}>No days logged yet — get after it.</p>;
+  return (
+    <div>
+      <h2 style={{ fontFamily: "Anton, sans-serif", fontSize: 18, letterSpacing: 1, color: "#f5f5f2", marginBottom: 14 }}>HISTORY</h2>
+      {days.map((d) => {
+        const entries = history[d] || [];
+        const totals = entries.reduce((acc, e) => ({ calories: acc.calories + e.calories, protein: acc.protein + e.protein, carbs: acc.carbs + e.carbs, fat: acc.fat + e.fat }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+        return (
+          <div key={d} style={{ background: "#141414", border: "1px solid #232323", borderRadius: 10, padding: "12px 14px", marginBottom: 8 }}>
+            <div style={{ display: "flex", justifyContent: "space-between" }}>
+              <span style={{ color: "#f5f5f2", fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>{d}</span>
+              <span style={{ color: "#ff5a1f", fontFamily: "'JetBrains Mono', monospace", fontSize: 13 }}>{Math.round(totals.calories)} kcal</span>
+            </div>
+            <div style={{ color: "#6a6a66", fontSize: 12, marginTop: 4, fontFamily: "'JetBrains Mono', monospace" }}>
+              P {Math.round(totals.protein)}g · C {Math.round(totals.carbs)}g · F {Math.round(totals.fat)}g · {entries.length} item{entries.length !== 1 ? "s" : ""}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/* ---------- Main App ---------- */
+
+function FatBoyCalc() {
+  const [targets, setTargetsState] = useState(() => loadJSON("targets", DEFAULT_TARGETS));
+  const [apiKey, setApiKeyState] = useState(() => loadJSON("api-key", ""));
+  const today = TODAY();
+  const [log, setLog] = useState(() => loadJSON(`log:${today}`, []));
+  const [history, setHistory] = useState(() => {
+    const idx = loadJSON("log-index", []);
+    const h = {};
+    for (const d of idx) { if (d === today) continue; h[d] = loadJSON(`log:${d}`, []); }
+    return h;
+  });
+  const [showModal, setShowModal] = useState(false);
+  const [view, setView] = useState("today");
+
+  const setTargets = (t) => { setTargetsState(t); saveJSON("targets", t); };
+  const setApiKey = (k) => { setApiKeyState(k); saveJSON("api-key", k); };
+
+  function persistTodayLog(entries) {
+    saveJSON(`log:${today}`, entries);
+    const idx = loadJSON("log-index", []);
+    if (!idx.includes(today)) { idx.push(today); saveJSON("log-index", idx); }
+  }
+
+  function addEntry(entry) {
+    const next = [...log, entry];
+    setLog(next);
+    persistTodayLog(next);
+    setShowModal(false);
+  }
+
+  function removeEntry(id) {
+    const next = log.filter((e) => e.id !== id);
+    setLog(next);
+    persistTodayLog(next);
+  }
+
+  const totals = log.reduce((acc, e) => ({ calories: acc.calories + e.calories, protein: acc.protein + e.protein, carbs: acc.carbs + e.carbs, fat: acc.fat + e.fat }), { calories: 0, protein: 0, carbs: 0, fat: 0 });
+  const remaining = Math.max(0, targets.calories - totals.calories);
+  const pct = targets.calories > 0 ? totals.calories / targets.calories : 0;
+
+  return (
+    <div style={{ background: "#0d0d0d", minHeight: "100vh", color: "#f5f5f2", fontFamily: "Inter, system-ui, sans-serif", maxWidth: 480, margin: "0 auto", paddingBottom: 90 }}>
+      <div style={{ padding: "22px 18px 8px", display: "flex", alignItems: "center", gap: 10 }}>
+        <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+          <rect x="1" y="10" width="4" height="4" fill="#ff5a1f" />
+          <rect x="5" y="8" width="3" height="8" fill="#ff5a1f" />
+          <rect x="8" y="11" width="8" height="2" fill="#f5f5f2" />
+          <rect x="16" y="8" width="3" height="8" fill="#ff5a1f" />
+          <rect x="19" y="10" width="4" height="4" fill="#ff5a1f" />
+        </svg>
+        <span style={{ fontFamily: "Anton, sans-serif", fontSize: 22, letterSpacing: 1.5, color: "#f5f5f2" }}>FAT BOY CALC</span>
+      </div>
+
+      <div style={{ padding: "10px 18px 100px" }}>
+        {view === "today" && (
+          <>
+            <div style={{ background: "#141414", border: "1px solid #232323", borderRadius: 16, padding: 22, display: "flex", alignItems: "center", gap: 20, marginBottom: 18, boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)" }}>
+              <div style={{ position: "relative", width: 176, height: 176, flexShrink: 0 }}>
+                <Ring pct={pct} />
+                <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center" }}>
+                  <span style={{ fontFamily: "Anton, sans-serif", fontSize: 34, color: "#f5f5f2", lineHeight: 1 }}>{remaining}</span>
+                  <span style={{ fontSize: 11, color: "#7a7a76", letterSpacing: 1, marginTop: 4 }}>KCAL LEFT</span>
+                </div>
+              </div>
+              <div style={{ flex: 1, fontFamily: "'JetBrains Mono', monospace", fontSize: 13, color: "#8a8a86" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span>EATEN</span><span style={{ color: "#f5f5f2" }}>{Math.round(totals.calories)}</span></div>
+                <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}><span>TARGET</span><span style={{ color: "#f5f5f2" }}>{targets.calories}</span></div>
+                <div style={{ height: 1, background: "#232323", margin: "8px 0" }} />
+                {log.length}<span style={{ marginLeft: 4 }}>item{log.length !== 1 ? "s" : ""} logged today</span>
+              </div>
+            </div>
+
+            <div style={{ marginBottom: 18 }}>
+              {MACRO_DEF.map((def) => <MacroBar key={def.key} def={def} value={totals[def.key]} target={targets[def.key]} />)}
+            </div>
+
+            <Button onClick={() => setShowModal(true)} style={{ width: "100%", marginBottom: 20 }}>+ ADD FOOD</Button>
+
+            <h2 style={{ fontFamily: "Anton, sans-serif", fontSize: 15, letterSpacing: 1, color: "#8a8a86", marginBottom: 10 }}>TODAY'S LOG</h2>
+            {log.length === 0 && <p style={{ color: "#5a5a56", fontSize: 13 }}>Nothing logged yet. Snap a photo or search to add your first item.</p>}
+            {[...log].reverse().map((e) => (
+              <div key={e.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "#141414", border: "1px solid #212121", borderRadius: 10, padding: "10px 12px", marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontSize: 14, color: "#f5f5f2" }}>{e.name}</div>
+                  <div style={{ fontSize: 12, color: "#6a6a66", fontFamily: "'JetBrains Mono', monospace" }}>{e.calories} kcal · P{e.protein} C{e.carbs} F{e.fat}</div>
+                </div>
+                <button onClick={() => removeEntry(e.id)} style={{ background: "none", border: "none", color: "#5a5a56", fontSize: 16, cursor: "pointer" }}>✕</button>
+              </div>
+            ))}
+          </>
+        )}
+
+        {view === "history" && <History history={history} />}
+        {view === "settings" && <Settings targets={targets} setTargets={setTargets} apiKey={apiKey} setApiKey={setApiKey} />}
+      </div>
+
+      <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 480, background: "#111", borderTop: "1px solid #232323", display: "flex" }}>
+        {[{ id: "today", label: "TODAY" }, { id: "history", label: "HISTORY" }, { id: "settings", label: "TARGETS" }].map((t) => (
+          <button key={t.id} onClick={() => setView(t.id)} style={{ flex: 1, padding: "14px 0", background: "none", border: "none", borderTop: view === t.id ? "2px solid #ff5a1f" : "2px solid transparent", color: view === t.id ? "#f5f5f2" : "#6a6a66", fontFamily: "Anton, sans-serif", fontSize: 12, letterSpacing: 1, cursor: "pointer" }}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {showModal && <AddFoodModal onClose={() => setShowModal(false)} onAdd={addEntry} apiKey={apiKey} onNeedApiKey={() => setView("settings")} />}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<FatBoyCalc />);
+</script>
+</body>
+</html>
